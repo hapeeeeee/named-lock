@@ -34,6 +34,10 @@ mod error;
 mod unix;
 #[cfg(windows)]
 mod windows;
+#[cfg(target_arch = "wasm32")]
+mod wasm;
+#[cfg(target_arch = "wasm32")]
+use wasm as sys;
 
 pub use crate::error::*;
 #[cfg(unix)]
