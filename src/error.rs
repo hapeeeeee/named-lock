@@ -9,11 +9,12 @@ pub enum Error {
     #[error("Invalid character in name")]
     InvalidCharacter,
 
-    #[error("Name must not be empty")]
-    EmptyName,
-
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("Failed to create named lock: {0}")]
     CreateFailed(#[source] std::io::Error),
+    #[cfg(target_arch = "wasm32")]
+    #[error("Failed to create named lock")]
+    CreateFailed,
 
     #[error("Failed to lock named lock")]
     LockFailed,

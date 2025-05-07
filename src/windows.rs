@@ -1,66 +1,63 @@
+use libc::{LOCK_EX, LOCK_NB, LOCK_UN};
+use std::fs::{File, OpenOptions};
 use std::io;
-
-use windows::core::HSTRING;
-use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
-};
-use windows::Win32::System::Threading::{
-    CreateMutexW, ReleaseMutex, WaitForSingleObject, INFINITE,
-};
+use std::os::unix::io::{AsRawFd, RawFd};
+use std::path::Path;
 
 use crate::error::*;
 
 #[derive(Debug)]
 pub(crate) struct RawNamedLock {
-    handle: HANDLE,
+    lock_file: File,
 }
 
-unsafe impl Sync for RawNamedLock {}
-unsafe impl Send for RawNamedLock {}
-
 impl RawNamedLock {
-    pub(crate) fn create(name: &str) -> Result<RawNamedLock> {
-        let handle = unsafe {
-            CreateMutexW(None, false, &HSTRING::from(name))
-                .map_err(|e| Error::CreateFailed(io::Error::from(e)))?
-        };
+    pub(crate) fn create(lock_path: &Path) -> Result<RawNamedLock> {
+        let lock_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+            .or_else(|_| OpenOptions::new().write(true).open(&lock_path))
+            .map_err(Error::CreateFailed)?;
 
         Ok(RawNamedLock {
-            handle,
+            lock_file,
         })
     }
 
     pub(crate) fn try_lock(&self) -> Result<()> {
-        let rc = unsafe { WaitForSingleObject(self.handle, 0) };
-
-        if rc == WAIT_OBJECT_0 || rc == WAIT_ABANDONED {
-            Ok(())
-        } else if rc == WAIT_TIMEOUT {
-            Err(Error::WouldBlock)
-        } else {
-            Err(Error::LockFailed)
-        }
+        unsafe { flock(self.lock_file.as_raw_fd(), LOCK_EX | LOCK_NB) }
     }
 
     pub(crate) fn lock(&self) -> Result<()> {
-        let rc = unsafe { WaitForSingleObject(self.handle, INFINITE) };
-
-        if rc == WAIT_OBJECT_0 || rc == WAIT_ABANDONED {
-            Ok(())
-        } else {
-            Err(Error::LockFailed)
-        }
+        unsafe { flock(self.lock_file.as_raw_fd(), LOCK_EX) }
     }
 
     pub(crate) fn unlock(&self) -> Result<()> {
-        unsafe { ReleaseMutex(self.handle).map_err(|_| Error::UnlockFailed) }
+        unsafe { flock(self.lock_file.as_raw_fd(), LOCK_UN) }
     }
 }
 
-impl Drop for RawNamedLock {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = CloseHandle(self.handle);
+unsafe fn flock(fd: RawFd, operation: i32) -> Result<()> {
+    loop {
+        let rc = libc::flock(fd, operation);
+
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            } else if err.kind() == io::ErrorKind::WouldBlock {
+                return Err(Error::WouldBlock);
+            } else if (operation & LOCK_EX) == LOCK_EX {
+                return Err(Error::LockFailed);
+            } else if (operation & LOCK_UN) == LOCK_UN {
+                return Err(Error::UnlockFailed);
+            }
         }
+
+        break;
     }
+
+    Ok(())
 }

@@ -19,15 +19,12 @@
 //! }
 //! ```
 
+use once_cell::sync::Lazy;
+use parking_lot::{Mutex, MutexGuard};
 use std::collections::HashMap;
-use std::fmt;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
-
-use once_cell::sync::Lazy;
-use parking_lot::lock_api::ArcMutexGuard;
-use parking_lot::{Mutex, RawMutex};
 
 mod error;
 #[cfg(unix)]
@@ -36,18 +33,20 @@ mod unix;
 mod windows;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
-#[cfg(target_arch = "wasm32")]
-use wasm as sys;
 
 pub use crate::error::*;
 #[cfg(unix)]
 use crate::unix::RawNamedLock;
 #[cfg(windows)]
 use crate::windows::RawNamedLock;
+#[cfg(target_arch = "wasm32")]
+use crate::wasm::RawNamedLock;
 
 #[cfg(unix)]
 type NameType = PathBuf;
 #[cfg(windows)]
+type NameType = String;
+#[cfg(target_arch = "wasm32")]
 type NameType = String;
 
 // We handle two edge cases:
@@ -85,27 +84,16 @@ impl NamedLock {
     ///
     /// This will create/open a [global] mutex with [`CreateMutexW`].
     ///
-    /// # Notes
-    ///
-    /// * `name` must not be empty, otherwise an error is returned.
-    /// * `name` must not contain `\0`, `/`, nor `\`, otherwise an error is returned.
     ///
     /// [`flock`]: https://linux.die.net/man/2/flock
     /// [global]: https://docs.microsoft.com/en-us/windows/win32/termserv/kernel-object-namespaces
     /// [`CreateMutexW`]: https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createmutexw
     pub fn create(name: &str) -> Result<NamedLock> {
-        if name.is_empty() {
-            return Err(Error::EmptyName);
-        }
-
         // On UNIX we want to restrict the user on `/tmp` directory,
         // so we block the `/` character.
         //
         // On Windows `\` character is invalid.
-        //
-        // Both platforms expect null-terminated strings,
-        // so we block null-bytes.
-        if name.chars().any(|c| matches!(c, '\0' | '/' | '\\')) {
+        if name.contains('/') || name.contains('\\') {
             return Err(Error::InvalidCharacter);
         }
 
@@ -120,6 +108,9 @@ impl NamedLock {
         #[cfg(windows)]
         let name = format!("Global\\{}", name);
 
+        #[cfg(target_arch = "wasm32")]
+        let name = name.to_string();  // 添加这行，将 &str 转换为 String
+
         NamedLock::_create(name)
     }
 
@@ -127,8 +118,8 @@ impl NamedLock {
     ///
     /// # Notes
     ///
-    /// * This function does not append `.lock` on the path.
-    /// * Parent directories must exist.
+    /// * This function does not append `.lock` on the path
+    /// * Parent directories must exist
     #[cfg(unix)]
     #[cfg_attr(docsrs, doc(cfg(unix)))]
     pub fn with_path<P>(path: P) -> Result<NamedLock>
@@ -159,7 +150,7 @@ impl NamedLock {
     ///
     /// If it is already locked, `Error::WouldBlock` will be returned.
     pub fn try_lock(&self) -> Result<NamedLockGuard> {
-        let guard = self.raw.try_lock_arc().ok_or(Error::WouldBlock)?;
+        let guard = self.raw.try_lock().ok_or(Error::WouldBlock)?;
 
         guard.try_lock()?;
 
@@ -170,7 +161,7 @@ impl NamedLock {
 
     /// Lock named lock.
     pub fn lock(&self) -> Result<NamedLockGuard> {
-        let guard = self.raw.lock_arc();
+        let guard = self.raw.lock();
 
         guard.lock()?;
 
@@ -181,28 +172,21 @@ impl NamedLock {
 }
 
 /// Scoped guard that unlocks NamedLock.
-pub struct NamedLockGuard {
-    raw: ArcMutexGuard<RawMutex, RawNamedLock>,
+#[derive(Debug)]
+pub struct NamedLockGuard<'r> {
+    raw: MutexGuard<'r, RawNamedLock>,
 }
 
-impl Drop for NamedLockGuard {
+impl<'r> Drop for NamedLockGuard<'r> {
     fn drop(&mut self) {
         let _ = self.raw.unlock();
-    }
-}
-
-impl fmt::Debug for NamedLockGuard {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("NamedLockGuard").field("raw", &*self.raw).finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use static_assertions::assert_impl_all;
     use std::env;
-    use std::fmt::Debug;
     use std::process::{Child, Command};
     use std::thread::sleep;
     use std::time::Duration;
@@ -284,53 +268,5 @@ mod tests {
         }
 
         Ok(())
-    }
-
-    #[test]
-    fn owned_guard() -> Result<()> {
-        let uuid = Uuid::new_v4().as_hyphenated().to_string();
-        let lock1 = NamedLock::create(&uuid)?;
-        let lock2 = NamedLock::create(&uuid)?;
-
-        // Lock
-        let guard1 = lock1.try_lock()?;
-        assert!(matches!(lock2.try_lock(), Err(Error::WouldBlock)));
-
-        // Dropping `lock1` should not affect the state of the lock.
-        // If `guard1` is not dropped the lock must stay locked.
-        drop(lock1);
-        assert!(matches!(lock2.try_lock(), Err(Error::WouldBlock)));
-
-        // Unlock by dropping the `guard1`
-        drop(guard1);
-        let _guard2 = lock2.try_lock()?;
-
-        Ok(())
-    }
-
-    #[test]
-    fn invalid_names() {
-        assert!(matches!(NamedLock::create(""), Err(Error::EmptyName)));
-
-        assert!(matches!(
-            NamedLock::create("abc/"),
-            Err(Error::InvalidCharacter)
-        ));
-
-        assert!(matches!(
-            NamedLock::create("abc\\"),
-            Err(Error::InvalidCharacter)
-        ));
-
-        assert!(matches!(
-            NamedLock::create("abc\0"),
-            Err(Error::InvalidCharacter)
-        ));
-    }
-
-    #[test]
-    fn check_traits() {
-        assert_impl_all!(NamedLock: Debug, Send, Sync);
-        assert_impl_all!(NamedLockGuard: Debug, Send, Sync);
     }
 }

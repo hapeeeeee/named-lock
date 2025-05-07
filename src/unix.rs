@@ -1,9 +1,8 @@
+use libc::{LOCK_EX, LOCK_NB, LOCK_UN};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::Path;
-
-use libc::{LOCK_EX, LOCK_NB, LOCK_UN};
 
 use crate::error::*;
 
@@ -17,8 +16,8 @@ impl RawNamedLock {
         let lock_file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(lock_path)
-            .or_else(|_| OpenOptions::new().write(true).open(lock_path))
+            .open(&lock_path)
+            .or_else(|_| OpenOptions::new().write(true).open(&lock_path))
             .map_err(Error::CreateFailed)?;
 
         Ok(RawNamedLock {
