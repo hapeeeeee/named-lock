@@ -29,18 +29,23 @@ use std::sync::{Arc, Weak};
 mod error;
 #[cfg(unix)]
 mod unix;
+#[cfg(all(target_arch = "wasm32", target_os = "wasi"))]
+mod wasm_wasi;
 #[cfg(windows)]
 mod windows;
-#[cfg(target_arch = "wasm32")]
+
+#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 mod wasm;
 
 pub use crate::error::*;
 #[cfg(unix)]
 use crate::unix::RawNamedLock;
+#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+use crate::wasm::RawNamedLock;
+#[cfg(all(target_arch = "wasm32", target_os = "wasi"))]
+use crate::wasm_wasi::RawNamedLock;
 #[cfg(windows)]
 use crate::windows::RawNamedLock;
-#[cfg(target_arch = "wasm32")]
-use crate::wasm::RawNamedLock;
 
 #[cfg(unix)]
 type NameType = PathBuf;
@@ -109,7 +114,7 @@ impl NamedLock {
         let name = format!("Global\\{}", name);
 
         #[cfg(target_arch = "wasm32")]
-        let name = name.to_string();  // 添加这行，将 &str 转换为 String
+        let name = name.to_string(); // 添加这行，将 &str 转换为 String
 
         NamedLock::_create(name)
     }
